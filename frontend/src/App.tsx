@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { HandLandmarker } from "@mediapipe/tasks-vision";
 import { createHandExtractor, extractHands } from "./holistic";
 import {
-  POSE_TEMPLATES_STORAGE_KEY,
   MAX_POSE_SAMPLES,
   PoseTemplate,
   mirrorHand,
@@ -117,21 +116,11 @@ export function App() {
     let active = true;
     async function loadPoseTemplates() {
       try {
-        const response = await fetch("http://127.0.0.1:8000/api/poses");
+        const response = await fetch("/api/poses");
         if (!response.ok) throw new Error(`Pose load failed (${response.status})`);
         const payload = await response.json() as { templates: PoseTemplate[] };
         if (!active) return;
-        if (payload.templates.length > 0) {
-          setPoseTemplates(payload.templates);
-          return;
-        }
-        const legacy = window.localStorage.getItem(POSE_TEMPLATES_STORAGE_KEY);
-        if (!legacy) return;
-        const migrated = JSON.parse(legacy) as PoseTemplate[];
-        if (migrated.length > 0) {
-          await persistPoseTemplates(migrated);
-          if (active) setPoseTemplates(migrated);
-        }
+        setPoseTemplates(payload.templates);
       } catch {
         if (active) setPredictionStatus("Unable to load saved poses");
       }
@@ -387,7 +376,7 @@ export function App() {
 
   async function persistPoseTemplates(templates: PoseTemplate[]) {
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/poses", {
+      const response = await fetch("/api/poses", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ templates }),

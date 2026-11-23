@@ -37,9 +37,15 @@ ensure_pose_templates_file()
 @app.get("/api/poses", response_model=PoseTemplatesPayload)
 def get_pose_templates() -> PoseTemplatesPayload:
     ensure_pose_templates_file()
-    return PoseTemplatesPayload.model_validate_json(
-        pose_templates_path.read_text(encoding="utf-8"),
-    )
+    try:
+        payload = PoseTemplatesPayload.model_validate_json(
+            pose_templates_path.read_text(encoding="utf-8"),
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Invalid pose template file at {pose_templates_path}: {exc}"
+        ) from exc
+    return payload
 
 
 @app.put("/api/poses", response_model=PoseTemplatesPayload)

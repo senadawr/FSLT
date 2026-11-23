@@ -26,7 +26,6 @@ export type PoseTemplate = {
   saved_at: string;
 };
 
-export const POSE_TEMPLATES_STORAGE_KEY = "fslt-pose-templates-v1";
 export const MAX_POSE_SAMPLES = 32;
 
 export function mirrorHand(
