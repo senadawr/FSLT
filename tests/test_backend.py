@@ -28,3 +28,26 @@ def test_websocket_rejects_bad_payload_and_handles_experimental_model():
         response = websocket.receive_json()
         assert response["prediction_status"] in {"uncertain", "recognized"}
         assert response["prediction"] is None
+
+
+def test_pose_templates_round_trip(tmp_path, monkeypatch):
+    import backend.app.main as main_module
+
+    test_path = tmp_path / "artifacts" / "pose_templates.json"
+    monkeypatch.setattr(main_module, "pose_templates_path", test_path)
+    main_module.ensure_pose_templates_file()
+    assert test_path.is_file()
+    assert test_path.read_text(encoding="utf-8") == '{\n  "templates": []\n}'
+    client = TestClient(main_module.app)
+
+    assert client.get("/api/poses").json() == {"templates": []}
+    payload = {
+        "templates": [{
+            "label": "A",
+            "landmarks": [[0.0, 0.0, 0.0]] * 21,
+            "samples": None,
+            "saved_at": "2026-11-23T00:00:00.000Z",
+        }],
+    }
+    assert client.put("/api/poses", json=payload).json() == payload
+    assert client.get("/api/poses").json() == payload

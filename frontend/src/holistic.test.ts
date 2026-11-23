@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { MAX_POSE_SAMPLES, mirrorHand, normalizeHand, poseConfidence, poseDistance } from "./collection";
+import {
+  MAX_POSE_SAMPLES,
+  mirrorHand,
+  normalizeHand,
+  poseConfidence,
+  poseDistance,
+} from "./collection";
 import { formatRecognitionText, shouldAppendRecognition } from "./App";
 
 describe("hand overlay contract", () => {

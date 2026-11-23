@@ -22,10 +22,21 @@ app.add_middleware(
 pose_templates_path = Path(__file__).resolve().parents[2] / "artifacts" / "pose_templates.json"
 
 
+def ensure_pose_templates_file() -> None:
+    pose_templates_path.parent.mkdir(parents=True, exist_ok=True)
+    if not pose_templates_path.is_file():
+        pose_templates_path.write_text(
+            json.dumps({"templates": []}, indent=2),
+            encoding="utf-8",
+        )
+
+
+ensure_pose_templates_file()
+
+
 @app.get("/api/poses", response_model=PoseTemplatesPayload)
 def get_pose_templates() -> PoseTemplatesPayload:
-    if not pose_templates_path.is_file():
-        return PoseTemplatesPayload(templates=[])
+    ensure_pose_templates_file()
     return PoseTemplatesPayload.model_validate_json(
         pose_templates_path.read_text(encoding="utf-8"),
     )
