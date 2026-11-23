@@ -40,6 +40,7 @@ export function App() {
   const [trackingFps, setTrackingFps] = useState(0);
   const [poseLabel, setPoseLabel] = useState("");
   const [poseTemplates, setPoseTemplates] = useState<PoseTemplate[]>([]);
+  const [poseLoadError, setPoseLoadError] = useState("");
   const poseCandidateRef = useRef<{ label: string; since: number; frames: number } | null>(null);
   const lastTypedRef = useRef<{ label: string; at: number } | null>(null);
   const currentHandRef = useRef<Array<[number, number, number]> | null>(null);
@@ -122,7 +123,11 @@ export function App() {
         if (!active) return;
         setPoseTemplates(payload.templates);
       } catch {
-        if (active) setPredictionStatus("Unable to load saved poses");
+        if (active) {
+          setPoseTemplates([]);
+          setPoseLoadError("Backend unavailable");
+          setPredictionStatus("Unable to load saved poses");
+        }
       }
     }
     void loadPoseTemplates();
@@ -629,6 +634,9 @@ export function App() {
               </div>
               <div className="pose-tools">
                 <span className="pose-count">{poseTemplates.length} saved</span>
+                {poseLoadError && (
+                  <span className="pose-load-error">{poseLoadError}</span>
+                )}
                 <label className="overlay-toggle">
                   <input
                     type="checkbox"

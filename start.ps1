@@ -85,6 +85,22 @@ if (-not (Test-Port 8000)) {
         -PassThru
 }
 
+$backendReady = $false
+for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    if (Test-Port 8000) {
+        $backendReady = $true
+        break
+    }
+    if ($null -ne $backendProcess -and $backendProcess.HasExited) {
+        break
+    }
+    Start-Sleep -Milliseconds 250
+}
+
+if (-not $backendReady) {
+    throw "Backend did not start on port 8000. Check Python dependencies with: .\.venv\Scripts\python.exe -m pip check"
+}
+
 $frontendReady = $false
 for ($attempt = 0; $attempt -lt 40; $attempt++) {
     if (Test-Port 5173) {
