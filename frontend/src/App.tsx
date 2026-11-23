@@ -17,6 +17,15 @@ import {
   trajectoryDistance,
   isZZigZag,
 } from "./collection";
+import {
+  calculateEvaluationResults,
+  createEvaluationRun,
+  currentEvaluationTarget,
+  evaluationResultsCsv,
+  isEvaluationLetter,
+  recordEvaluationTrial,
+  type EvaluationRun,
+} from "./evaluation";
 
 export function formatRecognitionText(label: string): string {
   if (/^[A-Za-z]$/.test(label)) return label.toUpperCase();
@@ -80,9 +89,47 @@ export function App() {
   const liveMotionUpdatedAtRef = useRef(0);
   const [motionRecording, setMotionRecording] = useState(false);
   const [motionSeconds, setMotionSeconds] = useState(0);
+  const [evaluationRun, setEvaluationRun] = useState<EvaluationRun | null>(null);
+  const evaluationRunRef = useRef<EvaluationRun | null>(null);
+  const [evaluationClassCount, setEvaluationClassCount] = useState<10 | 20>(10);
+  const [evaluationTrialsPerLetter, setEvaluationTrialsPerLetter] = useState(3);
   const compactTranslation = ["No close match", "Hold steady", "No translation"].includes(translation)
     ? "—"
     : translation;
+  const evaluationTarget = evaluationRun ? currentEvaluationTarget(evaluationRun) : null;
+  const evaluationResults = evaluationRun ? calculateEvaluationResults(evaluationRun) : null;
+
+  useEffect(() => {
+    evaluationRunRef.current = evaluationRun;
+    if (evaluationRun) {
+      window.localStorage.setItem("fslt-evaluation-run-v1", JSON.stringify(evaluationRun));
+    }
+  }, [evaluationRun]);
+
+  useEffect(() => {
+    try {
+      const savedRun = window.localStorage.getItem("fslt-evaluation-run-v1");
+      if (!savedRun) return;
+      const parsed = JSON.parse(savedRun) as EvaluationRun;
+      if (
+        Array.isArray(parsed.selectedLetters) &&
+        Array.isArray(parsed.targetOrder) &&
+        Array.isArray(parsed.trials) &&
+        typeof parsed.runId === "string" &&
+        (parsed.selectedLetters.length === 10 || parsed.selectedLetters.length === 20) &&
+        parsed.selectedLetters.every(isEvaluationLetter) &&
+        new Set(parsed.selectedLetters).size === parsed.selectedLetters.length &&
+        parsed.targetOrder.every(isEvaluationLetter) &&
+        parsed.targetOrder.length === parsed.selectedLetters.length * parsed.trialsPerLetter &&
+        parsed.trials.every((trial) => isEvaluationLetter(trial.expectedLetter))
+      ) {
+        evaluationRunRef.current = parsed;
+        setEvaluationRun(parsed);
+      }
+    } catch {
+      window.localStorage.removeItem("fslt-evaluation-run-v1");
+    }
+  }, []);
 
   useEffect(() => {
     showLandmarksRef.current = showLandmarks;
@@ -528,6 +575,7 @@ export function App() {
             lastTypedRef.current = { label: "J", at: now };
             staticRepeatBlockRef.current = { label: "I", until: now + 900 };
             setHistory((items) => [...items, "J"]);
+            recordEvaluationPrediction("J", Math.max(0.68, 1 - wristDistance));
             liveMotionRef.current = [];
             liveFingerMotionRef.current = [];
             poseCandidateRef.current = null;
@@ -557,6 +605,7 @@ export function App() {
         lastTypedRef.current = { label: "Z", at: zNow };
         staticRepeatBlockRef.current = { label: "S", until: zNow + 900 };
         setHistory((items) => [...items, "Z"]);
+        recordEvaluationPrediction("Z", 0.85);
         liveMotionRef.current = [];
         liveFingerMotionRef.current = [];
         poseCandidateRef.current = null;
@@ -637,6 +686,7 @@ export function App() {
     setTranslation(closest.template.label);
     lastTypedRef.current = { label: closest.template.label, at: now };
     setHistory((items) => [...items, closest.template.label]);
+    recordEvaluationPrediction(closest.template.label, nextConfidence);
   }
 
   function saveCurrentPose() {
@@ -925,6 +975,45 @@ export function App() {
     staticRepeatBlockRef.current = null;
   }
 
+  function startEvaluation() {
+    if (!trackingActiveRef.current) {
+      setPredictionStatus("Start the camera before starting an evaluation");
+      return;
+    }
+    const run = createEvaluationRun(evaluationClassCount, evaluationTrialsPerLetter);
+    evaluationRunRef.current = run;
+    setEvaluationRun(run);
+    poseCandidateRef.current = null;
+    lastTypedRef.current = null;
+    staticRepeatBlockRef.current = null;
+    setPredictionStatus("Evaluation started — sign the target shown below");
+  }
+
+  /** Called only after the recognizer has produced a label; the target is never an input to matching. */
+  function recordEvaluationPrediction(predictedLetter: string, predictionConfidence: number) {
+    const run = evaluationRunRef.current;
+    if (!run || run.completedAt) return;
+    const nextRun = recordEvaluationTrial(run, predictedLetter, predictionConfidence);
+    evaluationRunRef.current = nextRun;
+    setEvaluationRun(nextRun);
+    setPredictionStatus(
+      nextRun.completedAt
+        ? "Evaluation complete"
+        : `Trial recorded — ${nextRun.trials.length}/${nextRun.targetOrder.length}`,
+    );
+  }
+
+  function exportEvaluationResults() {
+    if (!evaluationRun) return;
+    const blob = new Blob([`\uFEFF${evaluationResultsCsv(evaluationRun)}`], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `fsl-evaluation-${evaluationRun.runId}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <main className="app-shell">
       <aside className="rail">
@@ -987,8 +1076,20 @@ export function App() {
                 <span className="fps">{trackingFps ? `${trackingFps} FPS` : "Measuring"}</span>
               </div>
               <div className="camera-history" aria-live="polite">
-                {typedHistory}
-                <span className="typing-caret" aria-hidden="true" />
+                {evaluationTarget ? (
+                  <div className="evaluation-target">
+                    <span>Sign this target</span>
+                    <strong>{evaluationTarget}</strong>
+                    <small>
+                      Trial {(evaluationRun?.trials.length ?? 0) + 1} of {evaluationRun?.targetOrder.length}
+                    </small>
+                  </div>
+                ) : (
+                  <>
+                    {typedHistory}
+                    <span className="typing-caret" aria-hidden="true" />
+                  </>
+                )}
               </div>
             </div>
           </section>
@@ -1082,6 +1183,151 @@ export function App() {
             </div>
           </div>
 
+          <div className="evaluation-panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Evaluation mode</p>
+                <h2>Randomized static fingerspelling evaluation</h2>
+              </div>
+              <button
+                className="secondary-button"
+                onClick={exportEvaluationResults}
+                disabled={!evaluationRun?.completedAt}
+              >
+                Export CSV
+              </button>
+            </div>
+
+            <p className="evaluation-note">
+              Targets are sampled only from the 24 supported static letters: A, B, C, D, E, F, G, H, I, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y.
+              The live recognizer makes its prediction independently; every recognized result is recorded automatically.
+            </p>
+
+            <div className="evaluation-config" aria-label="Evaluation configuration">
+              <div className="evaluation-config-group">
+                <span className="evaluation-label">Selected letters</span>
+                <div className="evaluation-choice-group" role="group" aria-label="Number of random letters">
+                  {([10, 20] as const).map((count) => (
+                    <button
+                      key={count}
+                      className={`evaluation-choice ${evaluationClassCount === count ? "selected" : ""}`}
+                      disabled={Boolean(evaluationTarget)}
+                      onClick={() => setEvaluationClassCount(count)}
+                    >
+                      {count} random letters
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label className="evaluation-config-group" htmlFor="evaluation-trials">
+                <span className="evaluation-label">Trials per selected letter</span>
+                <input
+                  id="evaluation-trials"
+                  className="evaluation-trials-input"
+                  type="number"
+                  min="1"
+                  max="20"
+                  step="1"
+                  value={evaluationTrialsPerLetter}
+                  disabled={Boolean(evaluationTarget)}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    if (Number.isInteger(value) && value >= 1 && value <= 20) {
+                      setEvaluationTrialsPerLetter(value);
+                    }
+                  }}
+                />
+              </label>
+              <button
+                className="primary-button evaluation-start"
+                disabled={!trackingActiveRef.current || Boolean(evaluationTarget)}
+                onClick={startEvaluation}
+              >
+                {evaluationRun ? "Start new randomized run" : "Start randomized evaluation"}
+              </button>
+            </div>
+
+            {evaluationRun && evaluationResults && (
+              <div className="evaluation-results" aria-live="polite">
+                <div className="evaluation-progress">
+                  <span>
+                    {evaluationRun.completedAt ? "Completed" : "In progress"}
+                  </span>
+                  <strong>{evaluationRun.trials.length} / {evaluationRun.targetOrder.length} trials recorded</strong>
+                </div>
+                <div className="evaluation-summary-grid">
+                  <div><span>Overall accuracy</span><strong>{(evaluationResults.overallAccuracy * 100).toFixed(1)}%</strong></div>
+                  <div><span>Correct</span><strong>{evaluationResults.correctCount}</strong></div>
+                  <div><span>Incorrect</span><strong>{evaluationResults.incorrectCount}</strong></div>
+                  <div><span>Macro F1</span><strong>{evaluationResults.macroF1.toFixed(3)}</strong></div>
+                  <div><span>Macro precision</span><strong>{evaluationResults.macroPrecision.toFixed(3)}</strong></div>
+                  <div><span>Macro recall</span><strong>{evaluationResults.macroRecall.toFixed(3)}</strong></div>
+                </div>
+
+                <div className="evaluation-table-wrap">
+                  <h3>Per-class metrics</h3>
+                  <table>
+                    <thead>
+                      <tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th><th>Correct</th><th>Incorrect</th></tr>
+                    </thead>
+                    <tbody>
+                      {evaluationResults.perClass.map((metric) => (
+                        <tr key={metric.letter}>
+                          <td>{metric.letter}</td>
+                          <td>{metric.precision.toFixed(3)}</td>
+                          <td>{metric.recall.toFixed(3)}</td>
+                          <td>{metric.f1Score.toFixed(3)}</td>
+                          <td>{metric.correctCount}</td>
+                          <td>{metric.incorrectCount}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="evaluation-table-wrap">
+                  <h3>Confusion matrix</h3>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Expected \ Predicted</th>
+                        {evaluationResults.confusionLabels.map((label) => <th key={label}>{label}</th>)}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {evaluationResults.confusionMatrix.map((row, rowIndex) => (
+                        <tr key={evaluationResults.perClass[rowIndex].letter}>
+                          <th>{evaluationResults.perClass[rowIndex].letter}</th>
+                          {row.map((count, columnIndex) => <td key={evaluationResults.confusionLabels[columnIndex]}>{count}</td>)}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="evaluation-table-wrap">
+                  <h3>Recorded trials</h3>
+                  <table>
+                    <thead>
+                      <tr><th>Trial ID</th><th>Expected</th><th>Predicted</th><th>Confidence</th><th>Timestamp</th><th>Status</th></tr>
+                    </thead>
+                    <tbody>
+                      {evaluationRun.trials.map((trial) => (
+                        <tr key={trial.trialId} className={trial.correct ? "trial-correct" : "trial-incorrect"}>
+                          <td>{trial.trialId}</td>
+                          <td>{trial.expectedLetter}</td>
+                          <td>{trial.predictedLetter ?? "No prediction"}</td>
+                          <td>{(trial.confidence * 100).toFixed(1)}%</td>
+                          <td>{new Date(trial.timestamp).toLocaleString()}</td>
+                          <td>{trial.correct ? "Correct" : "Incorrect"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
         </section>
       </section>
     </main>
