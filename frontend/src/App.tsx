@@ -3,11 +3,19 @@ import { HandLandmarker } from "@mediapipe/tasks-vision";
 import { createHandExtractor, extractHands } from "./holistic";
 import {
   MAX_POSE_SAMPLES,
+  MAX_MOTION_SAMPLES,
+  MOTION_RECORDING_MS,
   PoseTemplate,
+  appendMotionSample,
+  countPoseSamples,
   mirrorHand,
   normalizeHand,
   poseConfidence,
   poseDistance,
+  resampleTrajectory,
+  smoothTrajectory,
+  trajectoryDistance,
+  isZZigZag,
 } from "./collection";
 
 export function formatRecognitionText(label: string): string {
@@ -43,6 +51,7 @@ export function App() {
   const [poseLoadError, setPoseLoadError] = useState("");
   const poseCandidateRef = useRef<{ label: string; since: number; frames: number } | null>(null);
   const lastTypedRef = useRef<{ label: string; at: number } | null>(null);
+  const staticRepeatBlockRef = useRef<{ label: string; until: number } | null>(null);
   const currentHandRef = useRef<Array<[number, number, number]> | null>(null);
   const showLandmarksRef = useRef(true);
   const trackingActiveRef = useRef(false);
@@ -55,6 +64,22 @@ export function App() {
     right: null as Array<[number, number, number]> | null,
   });
   const heldHandTimesRef = useRef({ left: 0, right: 0 });
+  const motionRecordingRef = useRef<{
+    active: boolean;
+    label: string;
+    since: number;
+    points: Array<[number, number, number]>;
+    fingertipPoints: Array<Array<[number, number, number]>>;
+  }>({ active: false, label: "", since: 0, points: [], fingertipPoints: [] });
+  const liveMotionRef = useRef<Array<[number, number, number]>>([]);
+  const liveFingerMotionRef = useRef<Array<Array<[number, number, number]>>>([]);
+  const visualMotionRef = useRef<Array<[number, number, number, number]>>([]);
+  const visualFingerMotionRef = useRef<Array<Array<[number, number, number, number]>>>([]);
+  const activeMotionFingerIndexRef = useRef<number | null>(null);
+  const liveMotionTimeRef = useRef(0);
+  const liveMotionUpdatedAtRef = useRef(0);
+  const [motionRecording, setMotionRecording] = useState(false);
+  const [motionSeconds, setMotionSeconds] = useState(0);
   const compactTranslation = ["No close match", "Hold steady", "No translation"].includes(translation)
     ? "—"
     : translation;
@@ -79,7 +104,6 @@ export function App() {
         setTypedHistory("");
       }
     }
-
     frame = window.setInterval(() => {
       if (cancelled) return;
       if (nextLength >= target.length) {
@@ -231,6 +255,7 @@ export function App() {
           ? mirrorHand(handFrame.left_hand)
           : handFrame.right_hand;
         currentHandRef.current = hand;
+        updateMotionRecording(hand);
         matchPose(hand);
         const nextTrackedHands = {
           left: handFrame.left_hand !== null,
@@ -243,12 +268,213 @@ export function App() {
         );
       }
 
-    } catch {
-      setCameraState("Landmark extraction error");
+    } catch (error) {
+      console.error("Landmark extraction or matching error", error);
+      setPredictionStatus("Frame skipped");
+      setCameraState("Frame skipped — tracking continues");
     }
     if (!usingVideoFrameCallbackRef.current) {
       frameIdRef.current = window.requestAnimationFrame(trackHands);
     }
+  }
+
+  function getWristPoint(
+    hand: Array<[number, number, number]> | null,
+  ): [number, number, number] | null {
+    return hand?.[0] ?? null;
+  }
+
+  const FINGER_TIP_INDICES = [4, 8, 12, 16, 20];
+
+  function getMotionFingerIndex(label: string): number | null {
+    const normalized = label.trim().toUpperCase();
+    if (normalized === "J") return 4;
+    if (normalized === "Z") return 1;
+    return null;
+  }
+
+  function getFingerTips(
+    hand: Array<[number, number, number]> | null,
+  ): Array<[number, number, number]> {
+    return hand
+      ? FINGER_TIP_INDICES.map((index) => hand[index]).filter(
+          (point): point is [number, number, number] => point !== undefined,
+        )
+      : [];
+  }
+
+  function updateMotionRecording(
+    hand: Array<[number, number, number]> | null,
+  ) {
+    const now = performance.now();
+    const wrist = getWristPoint(hand);
+    if (!wrist || now - liveMotionUpdatedAtRef.current > 500) {
+      liveMotionRef.current = [];
+      liveFingerMotionRef.current = [];
+      visualMotionRef.current = [];
+      visualFingerMotionRef.current = [];
+      poseCandidateRef.current = null;
+    }
+    if (wrist) {
+      if (now - liveMotionTimeRef.current >= 50) {
+        const previousWrist = liveMotionRef.current.at(-1);
+        const smoothedWrist: [number, number, number] = previousWrist
+          ? [
+              previousWrist[0] + (wrist[0] - previousWrist[0]) * 0.45,
+              previousWrist[1] + (wrist[1] - previousWrist[1]) * 0.45,
+              previousWrist[2] + (wrist[2] - previousWrist[2]) * 0.45,
+            ]
+          : wrist;
+        liveMotionRef.current = [...liveMotionRef.current, smoothedWrist].slice(-36);
+        visualMotionRef.current = [
+          ...visualMotionRef.current,
+          [smoothedWrist[0], smoothedWrist[1], smoothedWrist[2], now] as [number, number, number, number],
+        ].slice(-10);
+        const fingerTips = getFingerTips(hand);
+        if (fingerTips.length === 5) {
+          liveFingerMotionRef.current = liveFingerMotionRef.current.length === 5
+            ? liveFingerMotionRef.current.map((trail, fingerIndex) => {
+                const previous = trail.at(-1);
+                const point = fingerTips[fingerIndex];
+                const smoothed: [number, number, number] = previous
+                  ? [
+                      previous[0] + (point[0] - previous[0]) * 0.45,
+                      previous[1] + (point[1] - previous[1]) * 0.45,
+                      previous[2] + (point[2] - previous[2]) * 0.45,
+                    ]
+                  : point;
+                return [...trail, smoothed].slice(-36);
+              })
+            : fingerTips.map((tip) => [tip]);
+
+          const activeLabel = motionRecordingRef.current.active
+            ? motionRecordingRef.current.label
+            : poseLabel.trim();
+          const selectedFingerIndex = getMotionFingerIndex(activeLabel);
+          const fingerIndices = selectedFingerIndex === null
+            ? [0, 1, 2, 3, 4]
+            : [selectedFingerIndex];
+          visualFingerMotionRef.current = visualFingerMotionRef.current.length === fingerIndices.length
+            ? visualFingerMotionRef.current.map((trail, sampleIndex) => {
+                const fingerIndex = fingerIndices[sampleIndex];
+                const previous = trail.at(-1);
+                const point = fingerTips[fingerIndex];
+                const smoothed: [number, number, number, number] = previous
+                  ? [
+                      previous[0] + (point[0] - previous[0]) * 0.45,
+                      previous[1] + (point[1] - previous[1]) * 0.45,
+                      previous[2] + (point[2] - previous[2]) * 0.45,
+                      now,
+                    ]
+                  : [point[0], point[1], point[2], now];
+                return [...trail, smoothed].slice(-10);
+              })
+            : fingerIndices.map((fingerIndex) =>
+                [[fingerTips[fingerIndex][0], fingerTips[fingerIndex][1], fingerTips[fingerIndex][2], now] as [number, number, number, number]],
+              );
+        }
+        liveMotionTimeRef.current = now;
+        liveMotionUpdatedAtRef.current = now;
+      }
+    }
+
+    const recording = motionRecordingRef.current;
+    if (!recording.active) return;
+    if (wrist) {
+      recording.points.push(wrist);
+      const fingerTips = getFingerTips(hand);
+      if (fingerTips.length === 5) recording.fingertipPoints.push(fingerTips);
+    }
+    const elapsed = now - recording.since;
+    setMotionSeconds(Math.min(elapsed / 1000, MOTION_RECORDING_MS / 1000));
+    if (elapsed >= MOTION_RECORDING_MS) {
+      finishMotionRecording();
+    }
+  }
+
+  function startMotionRecording() {
+    const label = poseLabel.trim();
+    if (!label) {
+      setPredictionStatus("Enter a label first");
+      return;
+    }
+    if (!trackingActiveRef.current || !currentHandRef.current) {
+      setPredictionStatus("Show a hand first");
+      return;
+    }
+    motionRecordingRef.current = {
+      active: true,
+      label,
+      since: performance.now(),
+      points: [],
+      fingertipPoints: [],
+    };
+    liveMotionRef.current = [];
+    liveFingerMotionRef.current = [];
+    visualMotionRef.current = [];
+    visualFingerMotionRef.current = [];
+    activeMotionFingerIndexRef.current = getMotionFingerIndex(label);
+    setMotionRecording(true);
+    setMotionSeconds(0);
+    setPredictionStatus(`Recording motion: ${label}`);
+  }
+
+  function finishMotionRecording() {
+    const recording = motionRecordingRef.current;
+    if (!recording.active) return;
+    recording.active = false;
+    setMotionRecording(false);
+    setMotionSeconds(0);
+
+    const motionSample = resampleTrajectory(smoothTrajectory(recording.points, 0.35));
+    const selectedFingerIndex = getMotionFingerIndex(recording.label);
+    const fingerMotionSample = recording.fingertipPoints.length >= 8
+      ? (selectedFingerIndex === null
+          ? FINGER_TIP_INDICES.map((_, fingerIndex) =>
+              resampleTrajectory(
+                smoothTrajectory(
+                  recording.fingertipPoints.map((tips) => tips[fingerIndex]),
+                  0.35,
+                ),
+              ),
+            )
+          : [resampleTrajectory(
+              smoothTrajectory(
+                recording.fingertipPoints.map((tips) => tips[selectedFingerIndex]),
+                0.35,
+              ),
+            )])
+      : undefined;
+    if (motionSample.length < 4 || recording.points.length < 8) {
+      setPredictionStatus("Motion too short. Hold the hand steady and try again.");
+      return;
+    }
+
+    setPoseTemplates((currentTemplates) => {
+      const existing = currentTemplates.find(
+        (item) => item.label.toLowerCase() === recording.label.toLowerCase(),
+      );
+      const fallbackLandmarks = currentHandRef.current
+        ? normalizeHand(currentHandRef.current)
+        : [];
+      const nextTemplates = appendMotionSample(
+        currentTemplates,
+        recording.label,
+        motionSample,
+        fallbackLandmarks,
+        fingerMotionSample,
+      );
+      void persistPoseTemplates(nextTemplates);
+
+      const savedCount = Math.min(
+        (existing?.motion_samples?.length ?? 0) + 1,
+        MAX_MOTION_SAMPLES,
+      );
+      setPredictionStatus(
+        `Saved motion: ${recording.label} (${savedCount}/${MAX_MOTION_SAMPLES} samples)`,
+      );
+      return nextTemplates;
+    });
   }
 
   function matchPose(hand: Array<[number, number, number]> | null) {
@@ -259,8 +485,88 @@ export function App() {
       if (!hand) lastTypedRef.current = null;
       return;
     }
+    const now = performance.now();
+    const jTemplate = poseTemplates.find(
+      (template) =>
+        template.label.trim().toUpperCase() === "J" &&
+        (template.motion_samples?.length ?? 0) > 0,
+    );
+    if (
+      jTemplate &&
+      !motionRecordingRef.current.active &&
+      liveMotionRef.current.length >= 12
+    ) {
+      const wristStart = liveMotionRef.current[0];
+      const wristEnd = liveMotionRef.current.at(-1);
+      const pinkyStart = liveFingerMotionRef.current[4]?.[0];
+      const pinkyEnd = liveFingerMotionRef.current[4]?.at(-1);
+      const wristTravel = wristStart && wristEnd
+        ? Math.hypot(wristEnd[0] - wristStart[0], wristEnd[1] - wristStart[1])
+        : 0;
+      const pinkyTravel = pinkyStart && pinkyEnd
+        ? Math.hypot(pinkyEnd[0] - pinkyStart[0], pinkyEnd[1] - pinkyStart[1])
+        : 0;
+      if (wristTravel >= 0.12 && pinkyTravel >= 0.12) {
+        const wristDistance = Math.min(
+          ...jTemplate.motion_samples!.map((sample) =>
+            trajectoryDistance(liveMotionRef.current, sample),
+          ),
+        );
+        if (wristDistance <= 0.48) {
+          if (poseCandidateRef.current?.label !== "J") {
+            poseCandidateRef.current = { label: "J", since: now, frames: 1 };
+          } else {
+            poseCandidateRef.current.frames += 1;
+          }
+          if (
+            poseCandidateRef.current.frames >= 5 &&
+            shouldAppendRecognition(lastTypedRef.current?.label ?? null, "J")
+          ) {
+            setTranslation("J");
+            setConfidence(Math.max(0.68, 1 - wristDistance));
+            setPredictionStatus("J motion matched");
+            lastTypedRef.current = { label: "J", at: now };
+            staticRepeatBlockRef.current = { label: "I", until: now + 900 };
+            setHistory((items) => [...items, "J"]);
+            liveMotionRef.current = [];
+            liveFingerMotionRef.current = [];
+            poseCandidateRef.current = null;
+          }
+          return;
+        }
+      }
+    }
+    if (
+      !motionRecordingRef.current.active &&
+      liveMotionRef.current.length >= 8 &&
+      isZZigZag(liveMotionRef.current)
+    ) {
+      const zNow = performance.now();
+      if (poseCandidateRef.current?.label !== "Z") {
+        poseCandidateRef.current = { label: "Z", since: zNow, frames: 1 };
+      } else {
+        poseCandidateRef.current.frames += 1;
+      }
+      if (
+        poseCandidateRef.current.frames >= 6 &&
+        shouldAppendRecognition(lastTypedRef.current?.label ?? null, "Z")
+      ) {
+        setTranslation("Z");
+        setConfidence(0.85);
+        setPredictionStatus("Z zig-zag matched");
+        lastTypedRef.current = { label: "Z", at: zNow };
+        staticRepeatBlockRef.current = { label: "S", until: zNow + 900 };
+        setHistory((items) => [...items, "Z"]);
+        liveMotionRef.current = [];
+        liveFingerMotionRef.current = [];
+        poseCandidateRef.current = null;
+      }
+      return;
+    }
     const normalized = normalizeHand(hand);
-    const matches = poseTemplates.map((template) => {
+    const matches = poseTemplates
+      .filter((template) => (template.motion_samples?.length ?? 0) === 0)
+      .map((template) => {
       const samples = template.samples?.length
         ? template.samples
         : [template.landmarks];
@@ -277,9 +583,23 @@ export function App() {
     const margin = runnerUp
       ? runnerUp.distance - closest.distance
       : 1;
-    const now = performance.now();
     const isAmbiguous = runnerUp !== undefined && margin < 0.018;
     const recognized = nextConfidence >= 0.68 && !isAmbiguous;
+    const repeatBlock = staticRepeatBlockRef.current;
+    if (repeatBlock && performance.now() >= repeatBlock.until) {
+      staticRepeatBlockRef.current = null;
+    }
+    const blockedRepeat = staticRepeatBlockRef.current;
+    if (
+      blockedRepeat &&
+      closest.template.label.trim().toUpperCase() === blockedRepeat.label &&
+      performance.now() < blockedRepeat.until
+    ) {
+      setConfidence(0);
+      setPredictionStatus("Motion finish — avoiding duplicate static letter");
+      poseCandidateRef.current = null;
+      return;
+    }
 
     setConfidence(recognized ? nextConfidence : 0);
     setPredictionStatus(
@@ -302,6 +622,16 @@ export function App() {
     if (candidate.frames < 2 || now - candidate.since < 90) return;
 
     const lastTyped = lastTypedRef.current;
+    if (
+      lastTyped?.label.trim().toUpperCase() === "J" &&
+      closest.template.label.trim().toUpperCase() === "I" &&
+      now - lastTyped.at < 900
+    ) return;
+    if (
+      lastTyped?.label.trim().toUpperCase() === "Z" &&
+      ["S", "X"].includes(closest.template.label.trim().toUpperCase()) &&
+      now - lastTyped.at < 900
+    ) return;
     if (!shouldAppendRecognition(lastTyped?.label ?? null, closest.template.label)) return;
 
     setTranslation(closest.template.label);
@@ -434,7 +764,6 @@ export function App() {
     const context = canvas.getContext("2d");
     if (!context) return;
     context.clearRect(0, 0, canvas.width, canvas.height);
-    if (!showLandmarksRef.current) return;
 
     const intrinsicWidth = video.videoWidth || rect.width;
     const intrinsicHeight = video.videoHeight || rect.height;
@@ -443,6 +772,58 @@ export function App() {
     const renderedHeight = intrinsicHeight * coverScale;
     const contentOffsetX = (rect.width - renderedWidth) / 2;
     const contentOffsetY = (rect.height - renderedHeight) / 2;
+    const now = performance.now();
+    const visibleTrailDuration = 600;
+    const isTrailVisible = ([, , , timestamp]: [number, number, number, number]) =>
+      now - timestamp < visibleTrailDuration;
+    const wristTrail = visualMotionRef.current.filter(isTrailVisible);
+    if (wristTrail.length >= 2) {
+      context.lineWidth = 4;
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      const wristPoints = wristTrail.map(([x, y]) => ({
+        x: rect.width - (contentOffsetX + x * renderedWidth),
+        y: contentOffsetY + y * renderedHeight,
+      }));
+      for (let index = 1; index < wristPoints.length; index += 1) {
+        const previous = wristPoints[index - 1];
+        const point = wristPoints[index];
+        const age = now - wristTrail[index][3];
+        const opacity = Math.max(0, 1 - age / visibleTrailDuration);
+        context.strokeStyle = `rgba(255, 255, 255, ${opacity * 0.95})`;
+        context.beginPath();
+        context.moveTo(previous.x, previous.y);
+        const midpointX = (previous.x + point.x) / 2;
+        const midpointY = (previous.y + point.y) / 2;
+        context.quadraticCurveTo(previous.x, previous.y, midpointX, midpointY);
+        context.stroke();
+      }
+    }
+    visualFingerMotionRef.current.forEach((trail) => {
+      if (trail.length < 2) return;
+      context.lineWidth = 2.5;
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      const visiblePoints = trail.filter(isTrailVisible);
+      const fingerPoints = visiblePoints.map(([x, y]) => ({
+        x: rect.width - (contentOffsetX + x * renderedWidth),
+        y: contentOffsetY + y * renderedHeight,
+      }));
+      for (let index = 1; index < fingerPoints.length; index += 1) {
+        const previous = fingerPoints[index - 1];
+        const point = fingerPoints[index];
+        const age = now - visiblePoints[index][3];
+        const opacity = Math.max(0, 1 - age / visibleTrailDuration);
+        context.strokeStyle = `rgba(255, 255, 255, ${opacity * 0.9})`;
+        context.beginPath();
+        context.moveTo(previous.x, previous.y);
+        const midpointX = (previous.x + point.x) / 2;
+        const midpointY = (previous.y + point.y) / 2;
+        context.quadraticCurveTo(previous.x, previous.y, midpointX, midpointY);
+        context.stroke();
+      }
+    });
+    if (!showLandmarksRef.current) return;
     const mapPoint = (x: number, y: number) => ({
       x: rect.width - (contentOffsetX + x * renderedWidth),
       y: contentOffsetY + y * renderedHeight,
@@ -457,7 +838,6 @@ export function App() {
       [0, 17],
     ];
 
-    const now = performance.now();
     const hands = [
       { key: "left" as const, detected: frame.left_hand },
       { key: "right" as const, detected: frame.right_hand },
@@ -542,6 +922,7 @@ export function App() {
     typedHistoryRef.current = "";
     poseCandidateRef.current = null;
     lastTypedRef.current = null;
+    staticRepeatBlockRef.current = null;
   }
 
   return (
@@ -656,6 +1037,15 @@ export function App() {
                 aria-label="Pose label"
               />
               <button
+                className="secondary-button motion-button"
+                disabled={!trackingActiveRef.current || motionRecording}
+                onClick={startMotionRecording}
+              >
+                {motionRecording
+                  ? `Recording ${Math.max(0, MOTION_RECORDING_MS / 1000 - motionSeconds).toFixed(1)}s`
+                  : "Record motion"}
+              </button>
+              <button
                 className="secondary-button"
                 disabled={!trackingActiveRef.current}
                 onClick={addPoseSample}
@@ -674,7 +1064,12 @@ export function App() {
               {poseTemplates.map((pose) => (
                 <div className="pose-chip" key={pose.label}>
                   <span className="pose-letter">{pose.label}</span>
-                  <span className="pose-samples">{pose.samples?.length ?? 1} samples</span>
+                  <span
+                    className="pose-samples"
+                    title={`${pose.samples?.length ?? 1} static, ${pose.motion_samples?.length ?? 0} motion`}
+                  >
+                    {countPoseSamples(pose)} {countPoseSamples(pose) === 1 ? "sample" : "samples"}
+                  </span>
                   <button
                     onClick={() => deletePose(pose.label)}
                     aria-label={`Delete ${pose.label}`}

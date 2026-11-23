@@ -46,6 +46,8 @@ def test_pose_templates_round_trip(tmp_path, monkeypatch):
             "label": "A",
             "landmarks": [[0.0, 0.0, 0.0]] * 21,
             "samples": None,
+            "motion_samples": [[[0.0, 0.0, 0.0]] * 24],
+            "finger_motion_samples": None,
             "saved_at": "2026-11-23T00:00:00.000Z",
         }],
     }

@@ -48,6 +48,8 @@ class PoseTemplate(BaseModel):
     label: str = Field(min_length=1, max_length=100)
     landmarks: list[list[float]] = Field(min_length=21, max_length=21)
     samples: list[list[list[float]]] | None = None
+    motion_samples: list[list[list[float]]] | None = None
+    finger_motion_samples: list[list[list[list[float]]]] | None = None
     saved_at: str = Field(min_length=1)
 
 

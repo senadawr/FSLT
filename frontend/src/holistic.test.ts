@@ -1,10 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_POSE_SAMPLES,
+  MAX_MOTION_SAMPLES,
+  MOTION_RECORDING_MS,
+  countPoseSamples,
+  smoothTrajectory,
+  isZZigZag,
+  appendMotionSample,
   mirrorHand,
   normalizeHand,
   poseConfidence,
   poseDistance,
+  normalizeTrajectory,
+  resampleTrajectory,
+  trajectoryDistance,
 } from "./collection";
 import { formatRecognitionText, shouldAppendRecognition } from "./App";
 
@@ -69,5 +78,88 @@ describe("hand overlay contract", () => {
 
   it("supports at least 32 pose samples per label", () => {
     expect(MAX_POSE_SAMPLES).toBeGreaterThanOrEqual(32);
+  });
+
+  it("counts each motion recording as one pose sample", () => {
+    const pose = {
+      label: "J",
+      landmarks: [],
+      motion_samples: [
+        [[0, 0, 0]] as Array<[number, number, number]>,
+        [[0.1, 0.1, 0]] as Array<[number, number, number]>,
+      ],
+      saved_at: "2026-11-23T00:00:00.000Z",
+    };
+    expect(countPoseSamples(pose)).toBe(2);
+  });
+
+  it("supports repeated 1.5-second motion recordings up to 32 samples", () => {
+    expect(MOTION_RECORDING_MS).toBe(1500);
+    expect(MAX_MOTION_SAMPLES).toBe(32);
+  });
+
+  it("appends repeated recordings to the current template state", () => {
+    const initial: never[] = [];
+    const first = appendMotionSample(initial, "J", [[0, 0, 0]], []);
+    const second = appendMotionSample(first, "J", [[0.1, 0.1, 0]], []);
+    expect(countPoseSamples(second[0])).toBe(2);
+  });
+
+  it("allows Z to accumulate the same 32 motion samples as J", () => {
+    let templates: Parameters<typeof appendMotionSample>[0] = [];
+    for (let index = 0; index < 32; index += 1) {
+      templates = appendMotionSample(
+        templates,
+        "Z",
+        [[index / 32, index / 64, 0]],
+        [],
+        [[[index / 32, index / 64, 0]]],
+      );
+    }
+    expect(countPoseSamples(templates[0])).toBe(32);
+  });
+
+  it("smooths noisy motion samples with exponential filtering", () => {
+    const noisy = [
+      [0, 0, 0],
+      [1, 0, 0],
+      [1, 1, 0],
+      [0, 1, 0],
+    ] as Array<[number, number, number]>;
+    const smoothed = smoothTrajectory(noisy, 0.5);
+    expect(smoothed).toHaveLength(noisy.length);
+    expect(smoothed[1][0]).toBeCloseTo(0.5);
+    expect(smoothed[2][1]).toBeCloseTo(0.5);
+  });
+
+  it("recognizes a Z-shaped horizontal zig-zag without exact template matching", () => {
+    const zPath = [
+      [0, 0, 0], [0.05, 0, 0], [0.1, 0, 0], [0.15, 0, 0],
+      [0.2, 0, 0], [0.25, 0.05, 0], [0.2, 0.1, 0],
+      [0.15, 0.15, 0], [0.1, 0.2, 0], [0.05, 0.25, 0],
+      [0, 0.3, 0], [0.05, 0.3, 0], [0.1, 0.3, 0],
+      [0.15, 0.3, 0], [0.2, 0.3, 0], [0.25, 0.3, 0],
+    ] as Array<[number, number, number]>;
+    expect(isZZigZag(zPath)).toBe(true);
+    expect(isZZigZag([
+      [0, 0, 0], [0.1, 0, 0], [0.2, 0, 0], [0.3, 0, 0],
+    ])).toBe(false);
+  });
+
+  it("normalizes motion trails before comparing them", () => {
+    const trail = [
+      [0.1, 0.2, 0],
+      [0.2, 0.1, 0],
+      [0.3, 0.2, 0],
+    ] as Array<[number, number, number]>;
+    const offset = trail.map(([x, y, z]) => [x + 0.4, y - 0.3, z] as [number, number, number]);
+
+    const normalized = normalizeTrajectory(trail);
+    expect(normalized[0]).toEqual([0, 0, 0]);
+    expect(normalized[1][0]).toBeCloseTo(0.5);
+    expect(normalized[1][1]).toBeCloseTo(-0.5);
+    expect(normalized[2]).toEqual([1, 0, 0]);
+    expect(resampleTrajectory(trail)).toHaveLength(24);
+    expect(trajectoryDistance(trail, offset)).toBeLessThan(0.05);
   });
 });
