@@ -14,6 +14,39 @@ function Test-Port($Port) {
 
 Set-Location $root
 
+function Find-Python {
+    foreach ($command in @(
+        @{ File = "py"; Arguments = @("-3.11") },
+        @{ File = "py"; Arguments = @("-3.10") },
+        @{ File = "python"; Arguments = @() }
+    )) {
+        try {
+            $probeArgs = $command.Arguments + @("-c", "import sys; print(sys.version_info[:2])")
+            $probe = & $command.File @probeArgs 2>$null
+            if ($LASTEXITCODE -eq 0 -and $probe) {
+                return $command
+            }
+        } catch {}
+    }
+    return $null
+}
+
+$venvPython = Join-Path $root ".venv\Scripts\python.exe"
+if (-not (Test-Path $venvPython)) {
+    $pythonCommand = Find-Python
+    if ($null -eq $pythonCommand) {
+        throw "Python was not found. Install Python 3.11 and enable Add Python to PATH."
+    }
+    Write-Host "Creating Python environment..."
+    $createArgs = $pythonCommand.Arguments + @("-m", "venv", (Join-Path $root ".venv"))
+    & $pythonCommand.File @createArgs
+    if ($LASTEXITCODE -ne 0) { throw "Python virtual environment creation failed." }
+}
+
+Write-Host "Checking backend dependencies..."
+& $venvPython "-m" "pip" "install" "-r" (Join-Path $root "backend\requirements.txt")
+if ($LASTEXITCODE -ne 0) { throw "Backend dependency installation failed." }
+
 if (-not (Test-Port 5173)) {
     if (-not (Test-Path "frontend\node_modules")) {
         Write-Host "Installing frontend dependencies..."
