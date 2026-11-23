@@ -16,15 +16,24 @@ Set-Location $root
 
 function Find-Python {
     foreach ($command in @(
+        @{ File = "py"; Arguments = @("-3.12") },
+        @{ File = "py"; Arguments = @("-3.13") },
         @{ File = "py"; Arguments = @("-3.11") },
-        @{ File = "py"; Arguments = @("-3.10") },
-        @{ File = "python"; Arguments = @() }
+        @{ File = "py"; Arguments = @("-3.10") }
     )) {
         try {
             $probeArgs = $command.Arguments + @("-c", "import sys; print(sys.version_info[:2])")
             $probe = & $command.File @probeArgs 2>$null
-            if ($LASTEXITCODE -eq 0 -and $probe) {
+            if ($LASTEXITCODE -eq 0 -and $probe -match "^\((3,\s*(10|11|12|13))\)") {
                 return $command
+            }
+        } catch {}
+    }
+    foreach ($pythonFile in @("python", "python3")) {
+        try {
+            $probe = & $pythonFile "-c" "import sys; print(sys.version_info[:2])" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $probe -match "^\((3,\s*(10|11|12|13))\)") {
+                return @{ File = $pythonFile; Arguments = @() }
             }
         } catch {}
     }
@@ -35,12 +44,18 @@ $venvPython = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $venvPython)) {
     $pythonCommand = Find-Python
     if ($null -eq $pythonCommand) {
-        throw "Python was not found. Install Python 3.11 and enable Add Python to PATH."
+        throw "Python 3.10 or newer was not found. Install Python and enable Add Python to PATH, then rerun start.cmd."
     }
     Write-Host "Creating Python environment..."
     $createArgs = $pythonCommand.Arguments + @("-m", "venv", (Join-Path $root ".venv"))
     & $pythonCommand.File @createArgs
     if ($LASTEXITCODE -ne 0) { throw "Python virtual environment creation failed." }
+}
+else {
+    $venvVersion = & $venvPython "-c" "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+    if ($LASTEXITCODE -ne 0 -or $venvVersion -notmatch "^3\.(10|11|12|13)$") {
+        throw "The existing .venv uses unsupported Python $venvVersion. Delete .venv and rerun start.cmd."
+    }
 }
 
 Write-Host "Checking backend dependencies..."

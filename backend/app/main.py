@@ -87,59 +87,17 @@ async def inference_socket(websocket: WebSocket) -> None:
         return
 
 
-asl_model = None
-asl_labels: list[str] = []
-try:
-    from tensorflow import keras
-    from pathlib import Path
-    import json
-
-    asl_path = Path("artifacts/asl_alphabet/gru_best.keras")
-    if asl_path.is_file():
-        asl_model = keras.models.load_model(asl_path)
-        labels_path = asl_path.parent / "labels.json"
-        if labels_path.is_file():
-            asl_labels = json.loads(labels_path.read_text(encoding="utf-8"))
-except Exception:
-    asl_model = None
-
-
 @app.websocket("/ws/asl")
 async def asl_socket(websocket: WebSocket) -> None:
     await websocket.accept()
     try:
         while True:
-            payload = await websocket.receive_json()
-            try:
-                frame = ASLHandFrame.model_validate(payload)
-            except ValidationError as exc:
-                await websocket.send_json({"error": "Invalid ASL hand frame", "details": exc.errors()})
-                continue
-            if asl_model is None:
-                await websocket.send_json({
-                    "prediction": None,
-                    "confidence": 0.0,
-                    "status": "unavailable",
-                    "model_version": "asl-gru-not-loaded",
-                })
-                continue
-            import numpy as np
-
-            raw = np.asarray(frame.hand, dtype=np.float32).reshape(21, 3)
-            wrist = raw[0:1, :]
-            scale = float(np.linalg.norm(raw[9] - raw[0]))
-            scale = scale if scale > 1e-6 else 1.0
-            normalized = (raw - wrist) / scale
-            probabilities = np.asarray(
-                asl_model.predict(normalized[None, ...], verbose=0)
-            )[0]
-            index = int(np.argmax(probabilities))
-            confidence = float(probabilities[index])
+            await websocket.receive_json()
             await websocket.send_json({
-                "prediction": asl_labels[index] if index < len(asl_labels) else None,
-                "confidence": confidence,
-                "status": "recognized" if confidence >= 0.75 else "uncertain",
-                "model_version": "experimental-asl-gru-v1",
+                "prediction": None,
+                "confidence": 0.0,
+                "status": "unavailable",
+                "model_version": "pose-templates-no-legacy-model",
             })
     except WebSocketDisconnect:
         return
