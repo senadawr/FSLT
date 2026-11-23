@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+.pytest_cache/
+.mypy_cache/
+node_modules/
+dist/
+coverage/
+.env
+artifacts/**/*.h5
+artifacts/**/*.keras
+artifacts/**/*.onnx
+artifacts/pose_templates.json
+data/
